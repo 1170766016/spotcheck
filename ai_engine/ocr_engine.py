@@ -40,7 +40,7 @@ def recognize(image: np.ndarray) -> tuple[list, dict]:
 
     Returns:
         (ocr_results, stats)
-        - ocr_results: PaddleOCR 原始结果
+        - ocr_results: 标准化结果
           格式: [[ [box, (text, confidence)], ... ]]
           box: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
         - stats: {"ocr_time_ms", "text_count"}
@@ -48,10 +48,10 @@ def recognize(image: np.ndarray) -> tuple[list, dict]:
     engine = get_ocr_engine()
 
     start = time.time()
-    results = engine.ocr(image)
+    results = list(engine.predict(image))
     ocr_time = round((time.time() - start) * 1000, 1)
 
-    # 标准化 OCR 结果，兼容 PP-OCRv5 / PaddleX 新格式和旧版格式
+    # 标准化 OCR 结果，兼容 PP-OCRv5 / PP-OCRv4 / PaddleX 新格式和旧版格式
     normalized_results = []
     text_count = 0
     
@@ -111,11 +111,12 @@ def warmup():
     """
     engine = get_ocr_engine()
 
-    # 空跑一张小图让引擎完全初始化
-    dummy = np.zeros((64, 200, 3), dtype=np.uint8)
+    # 空跑一张小图让引擎完全初始化（用最小尺寸减少预热时间）
+    dummy = np.zeros((32, 100, 3), dtype=np.uint8)
     # 在上面写一些文字以触发完整的 det+rec 流程
     import cv2
-    cv2.putText(dummy, "warmup", (10, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-    engine.ocr(dummy)
+    cv2.putText(dummy, "OK", (10, 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    list(engine.predict(dummy))
     print("[OCR] 引擎预热完成")
+

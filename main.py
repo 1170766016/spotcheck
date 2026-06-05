@@ -127,7 +127,7 @@ async def recognize_image(image: UploadFile = File(...)):
         )
         # 编码为 base64
         _, img_buffer = cv2.imencode(
-            ".jpg", annotated_img, [cv2.IMWRITE_JPEG_QUALITY, 85]
+            ".jpg", annotated_img, [cv2.IMWRITE_JPEG_QUALITY, 70]
         )
         annotated_b64 = base64.b64encode(img_buffer).decode("utf-8")
         annotate_time = round((time.time() - annotate_start) * 1000, 1)
