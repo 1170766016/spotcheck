@@ -50,12 +50,13 @@ _UNIT_PATTERN = "|".join(re.escape(u) for u in KNOWN_UNITS)
 # 核心解析函数
 # ============================================================
 
-def parse_ocr_results(ocr_results: list) -> list[dict]:
+def parse_ocr_results(ocr_results: list, debug: bool = False) -> list[dict]:
     """
     解析 PaddleOCR 结果，提取参数名-值对。
 
     Args:
         ocr_results: PaddleOCR 返回的原始结果
+        debug: 是否输出调试日志
 
     Returns:
         参数列表, 每个元素格式:
@@ -72,22 +73,32 @@ def parse_ocr_results(ocr_results: list) -> list[dict]:
 
     # Step 1: 解析所有文本框
     boxes = _parse_raw_boxes(ocr_results[0])
+    if debug:
+        print(f"[PARSE] 识别到 {len(boxes)} 个文本框")
 
     # 过滤低置信度
     min_conf = PARSER_CONFIG["min_confidence"]
     boxes = [b for b in boxes if b["confidence"] >= min_conf]
+    if debug:
+        print(f"[PARSE] 过滤后保留 {len(boxes)} 个框 (置信度 >= {min_conf})")
 
     if not boxes:
         return []
 
     # Step 2: 行内提取（单框中含参数名和值）
     inline_pairs, remaining = _extract_inline_pairs(boxes)
+    if debug:
+        print(f"[PARSE] 行内提取: {len(inline_pairs)} 对, 剩余 {len(remaining)} 框")
 
     # Step 3: 分类剩余文本框
     labels, values, others = _classify_boxes(remaining)
+    if debug:
+        print(f"[PARSE] 文本分类: {len(labels)} 个标签, {len(values)} 个值, {len(others)} 个其他")
 
     # Step 4: 空间配对
     spatial_pairs, unmatched_labels, unmatched_values = _spatial_match(labels, values)
+    if debug:
+        print(f"[PARSE] 空间配对: {len(spatial_pairs)} 对, 未匹配 {len(unmatched_labels)} 标签, {len(unmatched_values)} 值")
 
     # Step 5: 组装结果
     all_params = []
@@ -108,6 +119,11 @@ def parse_ocr_results(ocr_results: list) -> list[dict]:
 
     # 按置信度排序
     all_params.sort(key=lambda x: x["confidence"], reverse=True)
+
+    if debug:
+        print(f"[PARSE] 最终提取: {len(all_params)} 个参数")
+        for i, param in enumerate(all_params, 1):
+            print(f"       {i}. {param['name']}={param['value']}{param['unit']} ({param['source']})")
 
     return all_params
 
@@ -379,12 +395,13 @@ def _spatial_match(
     labels: list, values: list
 ) -> tuple[list, list, list]:
     """
-    根据空间位置关系，将标签和数值配对。
+    根据空间位置关系，将标签和数值配对。增强版本，支持复杂屏显。
 
-    配对逻辑：
-    1. 对每个标签，找最近的值（优先右侧同行，其次下方同列）
-    2. 使用贪心算法，按距离从近到远配对
-    3. 避免重复配对
+    改进点：
+    1. 按行/列分组，处理多行多列的参数布局
+    2. 优先同行配对，其次相邻行配对
+    3. 同列配对时优先相邻值
+    4. 支持参数名在值右边的情况（某些屏显布局）
 
     Returns:
         (pairs, unmatched_labels, unmatched_values)
@@ -440,46 +457,62 @@ def _spatial_match(
 
 def _pair_score(label: dict, value: dict, row_tolerance_ratio: float) -> float:
     """
-    计算标签和数值的配对得分（越小越好）。
+    计算标签和数值的配对得分（越小越好）。增强版本。
 
-    得分规则：
-    - 值在标签右侧同行 → 最优（低分）
-    - 值在标签下方同列 → 次优（中分）
-    - 值在标签左侧或上方 → 极高分（几乎不配对）
+    得分规则（优先级从高到低）：
+    1. 值在标签右侧同行 → 最优（低分）
+    2. 值在标签右下方 → 次优（中分）
+    3. 值在标签下方同列 → 次优（中分）
+    4. 其他情况 → 高分或无穷（不配对）
+    
+    改进点：
+    - 更细致的距离计算
+    - 考虑文本大小的相对性
+    - 对屏显布局的优化
     """
     lx, ly = label["center"]
     vx, vy = value["center"]
     lh = label["height"]
     vh = value["height"]
     lw = label["width"]
+    vw = value["width"]
 
     dx = vx - lx  # 正值 = 值在右边
     dy = vy - ly  # 正值 = 值在下面
 
-    # 值在标签左边太远 → 不配对
-    if dx < -lw * 0.3:
+    max_height = max(lh, vh)
+    row_tol = max_height * row_tolerance_ratio
+
+    # 规则1：值在标签左边太远 → 不配对
+    if dx < -lw * 0.5:
         return float("inf")
 
-    # 值在标签上方太远 → 不配对
-    if dy < -max(lh, vh) * 2:
+    # 规则2：值在标签上方太远 → 不配对
+    if dy < -max_height * 1.5:
         return float("inf")
 
-    # 同行判定
-    row_tol = max(lh, vh) * row_tolerance_ratio
+    # 规则3：同行判定（Y 距离小）
     if abs(dy) < row_tol:
         # 同一行，优先右侧
         if dx > 0:
-            return dx * 0.8 + abs(dy) * 1.5  # 右侧同行，最优
+            # 右侧同行，最优
+            # 距离越短分数越低
+            return dx * 0.5 + abs(dy) * 2.0
         else:
-            return abs(dx) * 3 + abs(dy) * 1.5  # 左侧同行，降权
+            # 左侧同行，降权但仍可能配对
+            return abs(dx) * 2.0 + abs(dy) * 2.0
 
-    # 不同行
+    # 规则4：不同行，值在下方
     if dy > 0:
-        # 值在下方
-        return abs(dx) * 2.0 + dy * 1.2
-    else:
-        # 值在上方（不太合理），高惩罚
-        return abs(dx) * 3.0 + abs(dy) * 3.0
+        # 优先右下方（屏显常见布局）
+        if dx >= -lw * 0.3:
+            return abs(dx) * 0.8 + dy * 1.5
+        else:
+            # 左下方
+            return abs(dx) * 2.0 + dy * 1.5
+    
+    # 规则5：值在上方（不太合理），高惩罚
+    return abs(dx) * 3.0 + abs(dy) * 3.0
 
 
 def _extract_value_and_unit(text: str) -> tuple[str, str]:

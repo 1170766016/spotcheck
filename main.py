@@ -67,21 +67,41 @@ app.add_middleware(
 # ============================================================
 
 @app.post("/api/recognize")
-async def recognize_image(image: UploadFile = File(...)):
+async def recognize_image(image: UploadFile = File(...), debug: bool = False):
     """
     核心接口：上传设备屏显图片，返回提取的参数列表。
+
+    Query Parameters:
+        debug: 是否返回详细诊断信息（默认 False）
 
     Returns:
         {
             "success": true,
             "data": {
                 "parameters": [
-                    {"name": "模具温度", "value": "180", "unit": "℃", ...}
+                    {"name": "模具温度", "value": "180", "unit": "℃", "confidence": 0.95, "source": "spatial"}
                 ],
                 "raw_texts": [...],
                 "annotated_image": "base64...",
-                "stats": {...}
-            }
+                "original_image": "base64...",
+                "stats": {
+                    "total_time_ms": 1234,
+                    "preprocess_time_ms": 45,
+                    "ocr_time_ms": 890,
+                    "parse_time_ms": 50,
+                    "annotate_time_ms": 45,
+                    "text_count": 12
+                },
+                "diagnostics": {  # 仅当 debug=true 时
+                    "original_size": "1920x1080",
+                    "processed_size": "960x540",
+                    "brightness_level": "normal",
+                    "is_screen_display": true,
+                    "clarity_level": "normal",
+                    "applied_enhancements": ["CLAHE_contrast", "edge_enhance"]
+                }
+            },
+            "error": null
         }
     """
     total_start = time.time()
@@ -96,31 +116,31 @@ async def recognize_image(image: UploadFile = File(...)):
         if len(image_bytes) == 0:
             raise HTTPException(400, "图片文件为空")
 
-        print("\n" + "="*60)
-        print("  [API] 开始图像分析请求...")
-        print("="*60)
+        print("\n" + "="*70)
+        print("  [API] 开始图像分析请求" + (" [DEBUG 模式]" if debug else "") + "...")
+        print("="*70)
 
         # Step 1: 图像预处理
         preprocess_start = time.time()
-        processed_img, preprocess_info = preprocess_image(image_bytes)
+        processed_img, preprocess_info = preprocess_image(image_bytes, debug=debug)
         preprocess_time = round((time.time() - preprocess_start) * 1000, 1)
-        print(f"[API] [Step 1] 图像预处理完成 | 原图尺寸: {preprocess_info['original_size']} -> 预处理尺寸: {preprocess_info['processed_size']} | 耗时: {preprocess_time}ms")
+        print(f"[API] [预处理] 原图: {preprocess_info['original_size']} → 处理后: {preprocess_info['processed_size']} | 增强: {preprocess_info['applied_enhancements']} | 耗时: {preprocess_time}ms")
 
         # Step 2: OCR 识别
-        print("[API] [Step 2] 开始运行 OCR 识别...")
+        print("[API] [OCR 识别] 启动模型推理...")
         ocr_results, ocr_stats = ocr_engine.recognize(processed_img)
-        print(f"[API] [Step 2] OCR 识别完成 | 文字行数量: {ocr_stats['text_count']} | OCR 模型加载耗时: {ocr_engine._model_load_time}ms | OCR 推理执行耗时: {ocr_stats['ocr_time_ms']}ms")
+        print(f"[API] [OCR 识别] 识别到 {ocr_stats['text_count']} 个文字框 | 耗时: {ocr_stats['ocr_time_ms']}ms")
 
         # Step 3: 参数解析
-        print("[API] [Step 3] 开始参数提取解析...")
+        print("[API] [参数提取] 开始智能参数配对...")
         parse_start = time.time()
-        parameters = parse_ocr_results(ocr_results)
+        parameters = parse_ocr_results(ocr_results, debug=debug)
         raw_texts = get_raw_texts(ocr_results)
         parse_time = round((time.time() - parse_start) * 1000, 1)
-        print(f"[API] [Step 3] 参数解析完成 | 提取到的参数数量: {len(parameters)} | 耗时: {parse_time}ms")
+        print(f"[API] [参数提取] 提取到 {len(parameters)} 个参数 | 耗时: {parse_time}ms")
 
         # Step 4: 生成标注图片
-        print("[API] [Step 4] 开始生成可视化标注图片...")
+        print("[API] [可视化] 生成标注图片...")
         annotate_start = time.time()
         annotated_img = create_annotated_image(
             processed_img, ocr_results, parameters
@@ -131,7 +151,7 @@ async def recognize_image(image: UploadFile = File(...)):
         )
         annotated_b64 = base64.b64encode(img_buffer).decode("utf-8")
         annotate_time = round((time.time() - annotate_start) * 1000, 1)
-        print(f"[API] [Step 4] 标注图片生成完成 | 耗时: {annotate_time}ms")
+        print(f"[API] [可视化] 标注图片生成完成 | 耗时: {annotate_time}ms")
 
         # 原图也转为 base64（用于前端对比展示）
         _, orig_buffer = cv2.imencode(
@@ -141,9 +161,9 @@ async def recognize_image(image: UploadFile = File(...)):
 
         # 总耗时
         total_time = round((time.time() - total_start) * 1000, 1)
-        print("="*60)
-        print(f"  [API] 图像分析处理成功！总耗时: {total_time}ms")
-        print("="*60 + "\n")
+        print("="*70)
+        print(f"✅ [完成] 总耗时: {total_time}ms (预处理{preprocess_time}ms + OCR{ocr_stats['ocr_time_ms']}ms + 提取{parse_time}ms + 可视化{annotate_time}ms)")
+        print("="*70 + "\n")
 
         # 保存上传的原始图片（用于后续追溯）
         save_name = f"{uuid.uuid4().hex[:12]}.jpg"
@@ -151,7 +171,8 @@ async def recognize_image(image: UploadFile = File(...)):
         with open(save_path, "wb") as f:
             f.write(image_bytes)
 
-        return JSONResponse({
+        # 构建响应体
+        response_data = {
             "success": True,
             "data": {
                 "parameters": parameters,
@@ -170,7 +191,21 @@ async def recognize_image(image: UploadFile = File(...)):
                     "processed_size": preprocess_info["processed_size"],
                 },
             },
-        })
+        }
+
+        # 如果启用调试模式，添加诊断信息
+        if debug:
+            response_data["data"]["diagnostics"] = {
+                "original_size": preprocess_info.get("original_size"),
+                "processed_size": preprocess_info.get("processed_size"),
+                "brightness_level": preprocess_info.get("brightness_level"),
+                "contrast_level": preprocess_info.get("contrast_level"),
+                "clarity_level": preprocess_info.get("clarity_level"),
+                "is_screen_display": preprocess_info.get("is_screen_display"),
+                "applied_enhancements": preprocess_info.get("applied_enhancements", []),
+            }
+
+        return JSONResponse(response_data)
 
     except HTTPException:
         raise

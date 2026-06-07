@@ -58,11 +58,45 @@ OCR_CONFIG.update({
 # 图像预处理配置
 # ============================================================
 IMAGE_CONFIG = {
-    "max_size": 960,               # 最大边长（从 1920 降到 960，减小推理图像）
-    "enhance_contrast": False,     # 设备屏显本身高对比度，跳过 CLAHE 增强（节省 ~85ms）
-    "clahe_clip_limit": 2.0,       # CLAHE 对比度限制（备用）
-    "clahe_grid_size": (8, 8),     # CLAHE 网格大小（备用）
-    "denoise": False,              # 是否去噪（设置为 False 以防止 fastNlMeansDenoisingColored 耗时过长导致接口挂起）
+    # 基础分辨率配置
+    "max_size": 960,               # 最大边长
+    "interpolation": "INTER_LANCZOS4",  # 插值方法（INTER_AREA/INTER_LINEAR/INTER_LANCZOS4）
+    
+    # 质量诊断与自适应处理
+    "enable_quality_diagnosis": True,   # 启用图片质量诊断
+    "enable_screen_detection": True,    # 启用屏显检测
+    "screen_black_threshold": 0.4,      # 黑色区域占比阈值（> 0.4 判定为屏显）
+    
+    # 对比度增强配置（根据诊断结果自动调整）
+    "enhance_contrast": True,      # 启用对比度增强
+    "clahe_clip_limit": 2.5,       # CLAHE 对比度限制（屏显用较温和的值）
+    "clahe_grid_size": (32, 32),   # CLAHE 网格大小（屏显优化）
+    
+    # 屏显特化处理
+    "screen_display": {
+        "adaptive_threshold_enabled": True,      # 自适应阈值处理
+        "adaptive_block_size": 31,               # 自适应阈值块大小
+        "adaptive_constant": 5,                  # 自适应阈值常数
+        "edge_enhance_enabled": True,            # 边缘增强（Unsharp mask）
+        "edge_enhance_sigma": 1.0,               # 高斯模糊 sigma
+        "edge_enhance_strength": 1.5,            # 增强强度
+        "invert_enabled": False,                 # 是否允许反色处理
+    },
+    
+    # 亮度/对比度校正
+    "gamma_correction_enabled": False,  # 伽马校正（针对曝光过度）
+    "gamma_value": 0.7,             # 伽马值（< 1.0 降低亮度）
+    "contrast_reduction": False,     # 对比度压缩
+    
+    # 去噪与锐化
+    "denoise": False,               # 自适应去噪（检测到模糊时启用）
+    "denoise_strength": 15,         # 去噪强度
+    "sharpen": False,               # 自适应锐化
+    "sharpen_strength": 1.0,        # 锐化强度
+    
+    # 清晰度阈值
+    "laplacian_threshold_blur": 50,  # Laplacian 方差（< 50 判定为模糊）
+    "laplacian_threshold_sharp": 200, # Laplacian 方差（> 200 判定为过锐）
 }
 
 # ============================================================
