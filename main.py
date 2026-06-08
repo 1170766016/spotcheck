@@ -13,14 +13,15 @@ from contextlib import asynccontextmanager
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import json
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import BASE_DIR, UPLOAD_DIR, FRONTEND_DIR, SERVER_CONFIG
+from config import BASE_DIR, UPLOAD_DIR, FRONTEND_DIR, SERVER_CONFIG, OCR_TUNING_DEFAULTS, IMAGE_TUNING_DEFAULTS
 from ai_engine import ocr_engine
-from ai_engine.preprocessor import preprocess_image, create_annotated_image
+from ai_engine.preprocessor import preprocess_image, create_annotated_image, auto_tune_params, load_saved_params, save_params_to_file
 from ai_engine.parser import parse_ocr_results, get_raw_texts
 
 
@@ -28,15 +29,30 @@ from ai_engine.parser import parse_ocr_results, get_raw_texts
 # 应用生命周期
 # ============================================================
 
+# ============================================================
+# 全局已保存参数（启动时加载）
+# ============================================================
+_saved_global_params: dict | None = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用启动时预热 OCR 引擎。"""
+    """应用启动时预热 OCR 引擎并加载已保存参数。"""
+    global _saved_global_params
     print("=" * 50)
-    print("  SpotCheck AI 正在启动...")
+    print("  SpotCheck 正在启动...")
     print("=" * 50)
+
+    # 加载已保存的参数
+    _saved_global_params = load_saved_params()
+    if _saved_global_params:
+        print(f"  [OK] 已加载保存的默认参数")
+    else:
+        print(f"  [INFO] 无已保存的参数文件，使用系统默认值")
+
     ocr_engine.warmup()
     print("=" * 50)
-    print("  [OK] SpotCheck AI 启动完成")
+    print("  [OK] SpotCheck 启动完成")
     print(f"  [INFO] 访问地址: http://localhost:{SERVER_CONFIG['port']}")
     print("=" * 50)
     yield
@@ -47,7 +63,7 @@ async def lifespan(app: FastAPI):
 # ============================================================
 
 app = FastAPI(
-    title="SpotCheck AI",
+    title="SpotCheck",
     description="制造业设备屏显智能点检系统",
     version="0.1.0",
     lifespan=lifespan,
@@ -67,7 +83,11 @@ app.add_middleware(
 # ============================================================
 
 @app.post("/api/recognize")
-async def recognize_image(image: UploadFile = File(...), debug: bool = False):
+async def recognize_image(
+    image: UploadFile = File(...),
+    debug: bool = False,
+    params: str = Form(None)
+):
     """
     核心接口：上传设备屏显图片，返回提取的参数列表。
 
@@ -116,19 +136,43 @@ async def recognize_image(image: UploadFile = File(...), debug: bool = False):
         if len(image_bytes) == 0:
             raise HTTPException(400, "图片文件为空")
 
+        # 解析自定义参数（如无前端参数则使用已保存的全局参数）
+        custom_params = None
+        ocr_params = None
+        if params:
+            try:
+                custom_params = json.loads(params)
+                print(f"[API] [后台日志] 收到自定义图像预处理参数:")
+                for k, v in custom_params.items():
+                    print(f"  - {k}: {v}")
+            except Exception as e:
+                print(f"[API] [警告] 自定义参数解析失败: {e}")
+
+        # 如果前端没有发送参数，使用已保存的全局参数
+        if custom_params is None and _saved_global_params:
+            custom_params = dict(_saved_global_params)
+            print(f"[API] [后台日志] 使用已保存的全局默认参数: {list(custom_params.keys())}")
+
+        # 提取 OCR 专用参数
+        if custom_params:
+            ocr_keys = list(OCR_TUNING_DEFAULTS.keys())
+            ocr_params = {k: custom_params[k] for k in ocr_keys if k in custom_params}
+            if ocr_params:
+                print(f"[API] [OCR 参数] 提取到 OCR 运行时参数: {ocr_params}")
+
         print("\n" + "="*70)
         print("  [API] 开始图像分析请求" + (" [DEBUG 模式]" if debug else "") + "...")
         print("="*70)
 
         # Step 1: 图像预处理
         preprocess_start = time.time()
-        processed_img, preprocess_info = preprocess_image(image_bytes, debug=debug)
+        processed_img, preprocess_info = preprocess_image(image_bytes, debug=debug, params=custom_params)
         preprocess_time = round((time.time() - preprocess_start) * 1000, 1)
         print(f"[API] [预处理] 原图: {preprocess_info['original_size']} → 处理后: {preprocess_info['processed_size']} | 增强: {preprocess_info['applied_enhancements']} | 耗时: {preprocess_time}ms")
 
         # Step 2: OCR 识别
         print("[API] [OCR 识别] 启动模型推理...")
-        ocr_results, ocr_stats = ocr_engine.recognize(processed_img)
+        ocr_results, ocr_stats = ocr_engine.recognize(processed_img, ocr_params=ocr_params)
         print(f"[API] [OCR 识别] 识别到 {ocr_stats['text_count']} 个文字框 | 耗时: {ocr_stats['ocr_time_ms']}ms")
 
         # Step 3: 参数解析
@@ -147,7 +191,7 @@ async def recognize_image(image: UploadFile = File(...), debug: bool = False):
         )
         # 编码为 base64
         _, img_buffer = cv2.imencode(
-            ".jpg", annotated_img, [cv2.IMWRITE_JPEG_QUALITY, 70]
+            ".jpg", annotated_img, [cv2.IMWRITE_JPEG_QUALITY, 90]
         )
         annotated_b64 = base64.b64encode(img_buffer).decode("utf-8")
         annotate_time = round((time.time() - annotate_start) * 1000, 1)
@@ -155,7 +199,7 @@ async def recognize_image(image: UploadFile = File(...), debug: bool = False):
 
         # 原图也转为 base64（用于前端对比展示）
         _, orig_buffer = cv2.imencode(
-            ".jpg", processed_img, [cv2.IMWRITE_JPEG_QUALITY, 85]
+            ".jpg", processed_img, [cv2.IMWRITE_JPEG_QUALITY, 92]
         )
         original_b64 = base64.b64encode(orig_buffer).decode("utf-8")
 
@@ -165,11 +209,27 @@ async def recognize_image(image: UploadFile = File(...), debug: bool = False):
         print(f"✅ [完成] 总耗时: {total_time}ms (预处理{preprocess_time}ms + OCR{ocr_stats['ocr_time_ms']}ms + 提取{parse_time}ms + 可视化{annotate_time}ms)")
         print("="*70 + "\n")
 
-        # 保存上传的原始图片（用于后续追溯）
-        save_name = f"{uuid.uuid4().hex[:12]}.jpg"
-        save_path = os.path.join(UPLOAD_DIR, save_name)
+        # 保存上传的原始图片（使用原文件名，重复则覆盖）
+        original_filename = image.filename or "unknown.jpg"
+        save_path = os.path.join(UPLOAD_DIR, original_filename)
         with open(save_path, "wb") as f:
             f.write(image_bytes)
+
+        # 保存 OCR 识别原始文本到同名 .txt 文件
+        stem = os.path.splitext(original_filename)[0]
+        txt_path = os.path.join(UPLOAD_DIR, f"{stem}.txt")
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(f"# 文件: {original_filename}\n")
+            f.write(f"# 识别时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"# 识别文字数: {ocr_stats['text_count']}\n")
+            f.write("#" + "=" * 50 + "\n\n")
+            for item in raw_texts:
+                text = item.get("text", "") if isinstance(item, dict) else str(item)
+                conf = item.get("confidence", "") if isinstance(item, dict) else ""
+                if conf:
+                    f.write(f"[{conf:.3f}] {text}\n")
+                else:
+                    f.write(f"{text}\n")
 
         # 构建响应体
         response_data = {
@@ -219,7 +279,47 @@ async def recognize_image(image: UploadFile = File(...), debug: bool = False):
 @app.get("/api/health")
 async def health_check():
     """健康检查接口。"""
-    return {"status": "ok", "service": "SpotCheck AI"}
+    return {"status": "ok", "service": "SpotCheck"}
+
+
+@app.get("/api/saved-params")
+async def get_saved_params():
+    """获取已保存的全局参数。"""
+    global _saved_global_params
+    if _saved_global_params:
+        return {"success": True, "data": _saved_global_params}
+    return {"success": True, "data": None}
+
+
+@app.post("/api/save-params")
+async def save_params(params: str = Form(...)):
+    """将当前参数永久保存为全局默认值。"""
+    global _saved_global_params
+    try:
+        parsed = json.loads(params)
+        if save_params_to_file(parsed):
+            _saved_global_params = parsed
+            print(f"[API] [保存参数] 已永久保存: {list(parsed.keys())}")
+            return {"success": True, "message": "参数已保存，后续所有图片将使用此参数"}
+        return JSONResponse({"success": False, "message": "保存失败"}, status_code=500)
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=400)
+
+
+@app.post("/api/auto-tune")
+async def auto_tune(image: UploadFile = File(...)):
+    """根据上传的图片自动分析并推荐最佳参数。"""
+    global _saved_global_params
+    try:
+        image_bytes = await image.read()
+        recommended = auto_tune_params(image_bytes, saved_params=_saved_global_params)
+        print(f"[API] [自动调优] 完成，推荐参数: {recommended}")
+        return {"success": True, "data": recommended}
+    except Exception as e:
+        print(f"[API] [自动调优] 失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
 
 # ============================================================
@@ -232,7 +332,7 @@ async def serve_index():
     index_path = os.path.join(FRONTEND_DIR, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {"message": "SpotCheck AI API is running. Frontend not found."}
+    return {"message": "SpotCheck API is running. Frontend not found."}
 
 
 # 静态文件

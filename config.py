@@ -44,15 +44,29 @@ else:  # "server"
 
 # 基础优化参数
 OCR_CONFIG.update({
-    "use_doc_orientation_classify": False,                                          # 跳过方向分类（加速）
+    "use_doc_orientation_classify": True,                                           # 自动检测文档方向（旋转检测）
     "use_doc_unwarping": False,                                                    # 跳过文档矫正（加速）
-    "use_textline_orientation": False,                                             # 跳过文本行方向（加速）
+    "use_textline_orientation": True,                                             # 自动检测文字行方向（旋转检测）
     "text_det_thresh": 0.3,                                                        # 检测阈值
     "text_det_box_thresh": 0.5,                                                    # 框置信度阈值
     "text_recognition_batch_size": 16,                                             # 识别批量大小（增大以提高吞吐）
     "enable_mkldnn": False,                                                        # 禁用 MKLDNN 以避免 PIR 兼容性报错
     "device": "cpu",                                                               # 在 CPU 上运行
 })
+
+# OCR 可调参数默认值（前端面板用）
+OCR_TUNING_DEFAULTS = {
+    "text_det_thresh": 0.3,          # 文字检测阈值（降低可检测更多模糊文字）
+    "text_det_box_thresh": 0.5,      # 文字框置信度阈值
+    "text_det_limit_side_len": 640,  # 检测输入尺寸限制（像素）
+    "text_recognition_batch_size": 16, # 识别批处理大小
+}
+
+# 图像基础参数默认值（前端面板用）
+IMAGE_TUNING_DEFAULTS = {
+    "max_size": 960,                 # 最大分辨率
+    "screen_black_threshold": 0.4,   # 黑底判定比例阈值
+}
 
 # ============================================================
 # 图像预处理配置
