@@ -45,7 +45,18 @@ def get_ocr_engine(overrides: dict = None) -> PaddleOCR:
         else:
             _current_overrides = {}
 
-        _ocr_instance = PaddleOCR(**merged_config)
+        # 提取引擎级参数以传入 engine_config
+        engine_keys = ["cpu_threads", "run_mode"]
+        engine_config = {}
+        for k in engine_keys:
+            if k in merged_config:
+                engine_config[k] = merged_config.pop(k)
+
+        if engine_config:
+            _ocr_instance = PaddleOCR(engine_config=engine_config, **merged_config)
+        else:
+            _ocr_instance = PaddleOCR(**merged_config)
+
         _model_load_time = round((time.time() - start) * 1000, 1)
         print(f"[OCR] 模型加载完成，耗时 {_model_load_time}ms")
         if overrides:
